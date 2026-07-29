@@ -46,7 +46,10 @@ class TitleSuggestionRequest(BaseModel):
     topic: str = Field(min_length=2, max_length=200)
     article_type: str = Field(default="技术", max_length=64)
     custom_type_description: str = Field(default="", max_length=1000)
-    writing_style: str = Field(default="温暖同行", max_length=64)
+    writing_style: str = Field(
+        default="保留原文主题和观点，用更自然、更有人情味的方式重新叙述",
+        max_length=1000,
+    )
     layout_style: str = Field(default="跟随原文", max_length=64)
     excluded_titles: list[str] = Field(default_factory=list, max_length=100)
     source_titles: list[str] = Field(default_factory=list, max_length=20)
