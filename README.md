@@ -58,8 +58,8 @@ ai-tech-article-generator/
 
 ```text
 数据库：ai_tech_articles
-用户：postgres
-密码：123456
+用户：xxxx
+密码：xxxx
 端口：5432
 ```
 
