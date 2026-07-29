@@ -61,6 +61,7 @@ const DEFAULT_SOURCE_SITES = [
   { id: 'zhihu', name: '知乎', domain: 'zhihu.com', url: 'https://www.zhihu.com/' },
   { id: 'cnblogs', name: '博客园', domain: 'cnblogs.com', url: 'https://www.cnblogs.com/' },
 ]
+const DEFAULT_WRITING_INSTRUCTION = '保留原文主题和观点，用更自然、更有人情味的方式重新叙述'
 const savedWritingPreferences = loadWritingPreferences()
 
 function loadCustomSites() {
@@ -127,7 +128,7 @@ const form = reactive({
   topic: '',
   article_type: savedWritingPreferences.article_type,
   custom_type_description: '',
-  writing_style: savedWritingPreferences.writing_style,
+  writing_style: savedWritingPreferences.writing_style || DEFAULT_WRITING_INSTRUCTION,
   layout_style: '跟随原文',
   target_word_count: 1500,
   target_platform: '微信公众号',
@@ -357,6 +358,16 @@ function workspaceKey(id = articleId.value) {
   return `article-studio-workspace-${id || 'new'}`
 }
 
+function normalizeWritingInstruction() {
+  const style = String(form.writing_style || '').trim()
+  const prompt = String(form.project_background || '').trim()
+  const parts = [style, prompt].filter(Boolean)
+  form.writing_style = (
+    parts.length ? [...new Set(parts)].join('；') : DEFAULT_WRITING_INSTRUCTION
+  ).slice(0, 1000)
+  form.project_background = ''
+}
+
 function saveWorkspaceSnapshot() {
   if (!workspaceReady.value) return
   clearTimeout(workspaceSaveTimer)
@@ -399,6 +410,7 @@ function restoreWorkspaceSnapshot() {
     const snapshot = JSON.parse(localStorage.getItem(workspaceKey()) || 'null')
     if (!snapshot?.form) return false
     Object.assign(form, snapshot.form)
+    normalizeWritingInstruction()
     normalizeTargetWordCount()
     if (form.selected_sources.length > 1) {
       form.selected_sources.splice(0, form.selected_sources.length - 1)
@@ -423,11 +435,13 @@ function restoreWorkspaceSnapshot() {
 }
 
 function payload(statusOverride) {
+  normalizeWritingInstruction()
   return {
     ...form,
     title: form.title.trim() || '未命名文章',
     topic: form.topic.trim(),
     layout_style: '跟随原文',
+    project_background: '',
     status: statusOverride || form.status || 'draft',
   }
 }
@@ -442,6 +456,7 @@ async function loadArticle() {
   try {
     const data = await articleApi.get(articleId.value)
     Object.assign(form, data)
+    normalizeWritingInstruction()
     normalizeTargetWordCount()
     form.layout_style = '跟随原文'
     searchQuery.value = data.topic
@@ -527,7 +542,9 @@ async function persistArticleImages() {
 
 async function resetWorkspaceForNewArticle(preserveWritingPreferences = false) {
   const rememberedArticleType = preserveWritingPreferences ? form.article_type : ''
-  const rememberedWritingStyle = preserveWritingPreferences ? form.writing_style : ''
+  const rememberedWritingStyle = preserveWritingPreferences
+    ? form.writing_style
+    : DEFAULT_WRITING_INSTRUCTION
   workspaceReady.value = false
   clearTimeout(workspaceSaveTimer)
   localStorage.removeItem(workspaceKey())
@@ -585,608 +602,7 @@ async function resetWorkspaceForNewArticle(preserveWritingPreferences = false) {
 async function handleSaveAction() {
   if (['generated', 'published'].includes(form.status)) {
     const saved = await persist(form.status, true)
-    if (saved) showNotice('文章修改已保存')
-    return
-  }
-  const saved = await persist('draft', true, false)
-  if (!saved) return
-  await resetWorkspaceForNewArticle()
-  showNotice('草稿已保存，创作台已清空，可以开始下一篇文章')
-}
-
-function usesMobileResearch() {
-  return typeof window !== 'undefined' && window.matchMedia('(max-width: 780px)').matches
-}
-
-async function discover(requestCount = 10, broadSearch = false) {
-  requestCount = Number.isInteger(requestCount) ? requestCount : 10
-  broadSearch = broadSearch === true
-  const query = (searchQuery.value || form.topic).trim()
-  if (!query) {
-    showNotice('先输入想查找的主题或关键词', 'error')
-    return
-  }
-  form.topic = query
-  sourceSort.value = 'newest'
-  searchResults.value = []
-  titleSuggestions.value = []
-  form.title = ''
-  form.selected_sources = []
-  targetWordCountCustomized.value = false
-  discovering.value = true
-  loadingTitles.value = true
-  let sourceError = null
-  let titleError = null
-  try {
-    try {
-      const sources = await articleApi.research(query, {
-        count: requestCount,
-        title_only: true,
-        broad_search: broadSearch,
-        exclude_urls: [],
-        source_domain: selectedSourceSite.value.domain,
-        source_name: selectedSourceSite.value.name,
-        date_range: sourceDateFilter.value,
-        sort_order: sourceSort.value,
-      })
-      searchResults.value = sources.items
-      if (sources.items.length < 5) {
-        showNotice(
-          `在${selectedSourceSite.value.name}只找到 ${sources.items.length} 篇相关文章，可以点“更多来源”或切换网站`,
-          'error',
-        )
-      }
-    } catch (error) {
-      sourceError = error
-    }
-
-    try {
-      const titles = await articleApi.suggestTitles({
-        topic: query,
-        article_type: form.article_type,
-        custom_type_description: form.custom_type_description,
-        writing_style: form.writing_style,
-        layout_style: '跟随原文',
-        excluded_titles: [],
-        source_titles: searchResults.value.slice(0, 8).map((item) => item.title),
-      })
-      titleSuggestions.value = titles.titles
-      titleHistory.value = [...titles.titles]
-      if (titles.titles.length && !form.title.trim()) form.title = titles.titles[0]
-    } catch (error) {
-      titleError = error
-    }
-
-    if (sourceError) {
-      showNotice(getApiError(sourceError, '来源检索失败，但标题仍可继续选择'), 'error')
-    } else if (titleError) {
-      showNotice(getApiError(titleError, '标题准备失败，但来源已经显示'), 'error')
-    }
-  } finally {
-    discovering.value = false
-    loadingTitles.value = false
-  }
-}
-
-function discoverMobile() {
-  return discover(20, true)
-}
-
-async function loadMoreSources(requestCount = 10, broadSearch = false) {
-  requestCount = Number.isInteger(requestCount) ? requestCount : 10
-  broadSearch = broadSearch === true
-  loadingMore.value = true
-  try {
-    const data = await articleApi.research(form.topic, {
-      count: requestCount,
-      title_only: true,
-      broad_search: broadSearch,
-      exclude_urls: searchResults.value.map((item) => item.url),
-      source_domain: selectedSourceSite.value.domain,
-      source_name: selectedSourceSite.value.name,
-      date_range: sourceDateFilter.value,
-      sort_order: sourceSort.value,
-    })
-    const known = new Set(searchResults.value.map((item) => item.url))
-    const fresh = data.items.filter((item) => !known.has(item.url))
-    searchResults.value.push(...fresh)
-    if (!fresh.length) showNotice('暂时没有更多不同来源，稍后换个关键词试试', 'error')
-  } catch (error) {
-    showNotice(getApiError(error, '加载更多来源失败'), 'error')
-  } finally {
-    loadingMore.value = false
-  }
-}
-
-function loadMoreMobileSources() {
-  return loadMoreSources(20, true)
-}
-
-async function refreshSourceFilters() {
-  const query = (searchQuery.value || form.topic).trim()
-  if (!query || discovering.value) return
-  discovering.value = true
-  try {
-    const mobileResearch = usesMobileResearch()
-    const data = await articleApi.research(query, {
-      count: 20,
-      title_only: true,
-      broad_search: mobileResearch,
-      exclude_urls: [],
-      source_domain: selectedSourceSite.value.domain,
-      source_name: selectedSourceSite.value.name,
-      date_range: sourceDateFilter.value,
-      sort_order: sourceSort.value,
-    })
-    searchResults.value = data.items
-    const selectedUrl = form.selected_sources[0]?.url
-    if (selectedUrl && !data.items.some((item) => item.url === selectedUrl)) {
-      form.selected_sources = []
-      form.title = ''
-      titleSuggestions.value = []
-    }
-    if (!data.items.length) {
-      showNotice(
-        `当前日期范围内没有找到相关文章，请放宽时间范围`,
-        'error',
-      )
-    } else {
-      const orderLabel = sourceSort.value === 'oldest' ? '从旧到新' : '从新到旧'
-      showNotice(`筛选已更新，共 ${data.items.length} 篇，按发布日期${orderLabel}排列`)
-    }
-  } catch (error) {
-    showNotice(getApiError(error, '更新日期筛选失败'), 'error')
-  } finally {
-    discovering.value = false
-  }
-}
-
-function selectSourceSite(site) {
-  selectedSourceId.value = site.id
-  sourceSort.value = 'newest'
-  sourceDateFilter.value = 'all'
-  searchResults.value = []
-  if ((searchQuery.value || form.topic).trim()) {
-    if (usesMobileResearch()) discoverMobile()
-    else discover()
-  }
-}
-
-function addCustomSite() {
-  try {
-    const name = customSiteName.value.trim()
-    if (!name) {
-      showNotice('请给这个网址填写一个便于识别的名称', 'error')
-      return
-    }
-    const parsed = new URL(customSiteUrl.value.trim())
-    const domain = parsed.hostname.replace(/^www\./, '')
-    if (!domain) throw new Error('invalid')
-    const normalizedUrl = parsed.toString().replace(/\/$/, '')
-    const customIndex = customSites.value.findIndex(
-      (site) => String(site.url || '').replace(/\/$/, '') === normalizedUrl,
-    )
-    if (customIndex >= 0) {
-      customSites.value[customIndex] = {
-        ...customSites.value[customIndex],
-        name,
-        domain,
-        url: parsed.toString(),
-      }
-      localStorage.setItem('article-custom-source-sites', JSON.stringify(customSites.value))
-      showCustomSite.value = false
-      customSiteUrl.value = ''
-      customSiteName.value = ''
-      selectSourceSite(customSites.value[customIndex])
-      showNotice(`已更新并显示网址“${name}”`)
-      return
-    }
-    const site = {
-      id: `custom-${Date.now()}`,
-      name,
-      domain,
-      url: parsed.toString(),
-    }
-    customSites.value.push(site)
-    localStorage.setItem('article-custom-source-sites', JSON.stringify(customSites.value))
-    showCustomSite.value = false
-    customSiteUrl.value = ''
-    customSiteName.value = ''
-    selectSourceSite(site)
-    showNotice(`已保存网址“${name}”，现在可以从来源选项中选择`)
-  } catch {
-    showNotice('请输入完整网址，例如 https://www.toutiao.com/', 'error')
-  }
-}
-
-function siteLoginKey(site) {
-  return site?.domain || site?.id || ''
-}
-
-function isSiteLoggedIn(site) {
-  return Boolean(sourceLoginStates.value[siteLoginKey(site)]?.confirmed)
-}
-
-function loginStateTime(site) {
-  const value = sourceLoginStates.value[siteLoginKey(site)]?.confirmed_at
-  if (!value) return ''
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return ''
-  return new Intl.DateTimeFormat('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(date)
-}
-
-function beginSiteLogin(site) {
-  pendingLoginSiteId.value = site.id
-}
-
-function confirmSiteLogin(site) {
-  if (!site) return
-  sourceLoginStates.value = {
-    ...sourceLoginStates.value,
-    [siteLoginKey(site)]: {
-      confirmed: true,
-      confirmed_at: new Date().toISOString(),
-    },
-  }
-  localStorage.setItem('article-source-login-states', JSON.stringify(sourceLoginStates.value))
-  pendingLoginSiteId.value = ''
-  showNotice(`${site.name}登录状态已刷新并保存在本机浏览器`)
-}
-
-let titleRequestVersion = 0
-async function reloadTitles() {
-  if (!form.topic.trim()) {
-    showNotice('请先输入文章主题', 'error')
-    return
-  }
-  const requestVersion = ++titleRequestVersion
-  loadingTitles.value = true
-  try {
-    const data = await articleApi.suggestTitles({
-      topic: form.topic,
-      article_type: form.article_type,
-      custom_type_description: form.custom_type_description,
-      writing_style: form.writing_style,
-      layout_style: '跟随原文',
-      excluded_titles: titleHistory.value.slice(-100),
-      source_titles: (
-        form.selected_sources.length ? form.selected_sources : searchResults.value
-      ).slice(0, 8).map((item) => item.title),
-    })
-    if (requestVersion === titleRequestVersion) {
-      titleSuggestions.value = data.titles
-      titleHistory.value = [...titleHistory.value, ...data.titles].slice(-100)
-      if (data.titles.length) form.title = data.titles[0]
-    }
-  } catch (error) {
-    if (requestVersion === titleRequestVersion) {
-      showNotice(getApiError(error, '标题生成失败'), 'error')
-    }
-  } finally {
-    if (requestVersion === titleRequestVersion) loadingTitles.value = false
-  }
-}
-
-function sourceSelected(source) {
-  return form.selected_sources.some((item) => item.url === source.url)
-}
-
-async function toggleSource(source) {
-  if (loadingSourceUrl.value) return
-  const index = form.selected_sources.findIndex((item) => item.url === source.url)
-  if (index >= 0) {
-    form.selected_sources.splice(index, 1)
-    targetWordCountCustomized.value = false
-    return
-  }
-  loadingSourceUrl.value = source.url
-  form.selected_sources.splice(0, form.selected_sources.length, {
-    ...source,
-    source_content: '',
-  })
-  showNotice('正在深度提取已选文章正文，请稍候')
-  try {
-    const hydrated = await articleApi.readSourceContent(source)
-    const resultIndex = searchResults.value.findIndex((item) => item.url === source.url)
-    if (resultIndex >= 0) searchResults.value.splice(resultIndex, 1, hydrated)
-    form.selected_sources.splice(0, form.selected_sources.length, hydrated)
-    useSourceWordCountAsDefault(hydrated)
-    showNotice(`正文提取完成，共 ${hydrated.word_count.toLocaleString()} 字`)
-    queueSelectedTitleRefresh()
-  } catch (error) {
-    form.selected_sources = []
-    targetWordCountCustomized.value = false
-    showNotice(getApiError(error, '正文提取失败，请选择另一篇文章'), 'error')
-  } finally {
-    loadingSourceUrl.value = ''
-  }
-}
-
-let selectedTitleRefreshTimer
-function queueSelectedTitleRefresh() {
-  clearTimeout(selectedTitleRefreshTimer)
-  if (!form.selected_sources.length) return
-  selectedTitleRefreshTimer = setTimeout(reloadTitles, 700)
-}
-
-function addCustomTitle() {
-  const value = customTitle.value.trim()
-  if (!value) {
-    showNotice('先写下你想使用的标题', 'error')
-    return
-  }
-  form.title = value.slice(0, 255)
-  if (!titleSuggestions.value.includes(form.title)) {
-    titleSuggestions.value = [form.title, ...titleSuggestions.value].slice(0, 10)
-  }
-  if (!titleHistory.value.includes(form.title)) {
-    titleHistory.value.push(form.title)
-  }
-  customTitle.value = ''
-  showNotice('已加入并选中你的标题')
-}
-
-async function handleGenerate() {
-  if (!form.article_type.trim() || !form.writing_style.trim()) {
-    showNotice('请填写文章类型和表达风格', 'error')
-    return
-  }
-  if (!canGenerate.value) {
-    showNotice('请先选择标题和一篇参考文章', 'error')
-    return
-  }
-  if (['generated', 'published'].includes(form.status)) {
-    localStorage.removeItem(workspaceKey())
-    articleId.value = null
-    Object.assign(form, {
-      content: '',
-      status: 'draft',
-      review_notes: '',
-      director_review_summary: '',
-      director_review_changes: [],
-      director_reviewed_at: null,
-      director_model_name: null,
-      model_name: null,
-      reviewer_model_name: null,
-      publish_records: [],
-      generated_word_count: 0,
-      prompt_tokens: 0,
-      completion_tokens: 0,
-      total_tokens: 0,
-    })
-  }
-  const saved = await persist('draft', true, false)
-  if (!saved) return
-  generating.value = true
-  try {
-    const queuedArticleId = articleId.value
-    const queuedTitle = form.title
-    saveWritingPreferences(form.article_type, form.writing_style)
-    const result = await articleApi.generateAsync(queuedArticleId)
-    addGenerationJob({
-      article_id: result.article_id,
-      title: queuedTitle,
-    })
-    form.status = 'generating'
-    if (Number(route.params.id) !== queuedArticleId) {
-      await router.replace(`/articles/${queuedArticleId}/edit`)
-    }
-    showNotice('文章正在后台生成，可以切换到其他页面', 'success', 2000)
-  } catch (error) {
-    showNotice(getApiError(error, '后台生成任务提交失败，草稿已经保留'), 'error')
-  } finally {
-    generating.value = false
-  }
-}
-
-async function openPublishCenter() {
-  if (form.status !== 'generated' || !form.content.trim()) {
-    showNotice('请先完成文章生成，再进入发布中心', 'error')
-    return
-  }
-  const saved = await persist('generated', true)
-  if (!saved) return
-  await router.push(`/articles/${articleId.value}/publish`)
-}
-
-async function copyMarkdown() {
-  if (!form.content) return showNotice('暂无可复制的 Markdown', 'error')
-  try {
-    await copyText(form.content)
-    showNotice('Markdown 已复制')
-  } catch (error) {
-    showNotice(error.message || '复制失败，请手动选择正文复制', 'error')
-  }
-}
-
-async function handleBackgroundGenerationCompleted(event) {
-  const completedArticle = event.detail?.article
-  if (!completedArticle || Number(completedArticle.id) !== Number(articleId.value)) return
-  await resetWorkspaceForNewArticle(true)
-}
-
-function handleBackgroundGenerationFailed(event) {
-  const failedArticle = event.detail?.article
-  if (!failedArticle || Number(failedArticle.id) !== Number(articleId.value)) return
-  Object.assign(form, failedArticle)
-  showNotice(failedArticle.review_notes || '后台生成失败，草稿已经保留', 'error')
-}
-
-onMounted(() => {
-  loadArticle()
-  loadImageAssets()
-  window.addEventListener('article-generation-completed', handleBackgroundGenerationCompleted)
-  window.addEventListener('article-generation-failed', handleBackgroundGenerationFailed)
-})
-watch(
-  [
-    form,
-    searchQuery,
-    searchResults,
-    titleSuggestions,
-    titleHistory,
-    customTitle,
-    selectedSourceId,
-    sourceSort,
-    sourceDateFilter,
-    editorTab,
-  ],
-  queueWorkspaceSave,
-  { deep: true },
-)
-onBeforeUnmount(() => {
-  clearTimeout(noticeTimer)
-  window.removeEventListener('article-generation-completed', handleBackgroundGenerationCompleted)
-  window.removeEventListener('article-generation-failed', handleBackgroundGenerationFailed)
-  saveWorkspaceSnapshot()
-})
-</script>
-
-<template>
-  <section class="studio-page">
-    <div v-if="loading" class="loading-state full-height">
-      <LoaderCircle class="spin" :size="25" />正在打开创作台…
-    </div>
-
-    <template v-else>
-      <header class="studio-header">
-        <div class="studio-breadcrumb">
-          <RouterLink to="/articles"><ArrowLeft :size="15" />文章库</RouterLink>
-          <span>/</span><strong>{{ isEditing ? `稿件 #${articleId}` : '新稿件' }}</strong>
-          <small class="workspace-autosave-state"><Save :size="11" />{{ autosaveState }}</small>
-        </div>
-        <div class="workflow-rail">
-          <span :class="{ done: searchResults.length }"><Search :size="12" />选题与来源</span>
-          <span>→</span>
-          <span :class="{ done: form.title }"><PenLine :size="12" />标题与风格</span>
-          <span>→</span>
-          <span :class="{ active: generating || isBackgroundGenerating, done: form.status === 'generated' }"><Sparkles :size="12" />专家</span>
-          <span>→</span>
-          <span :class="{ active: generating || isBackgroundGenerating, done: form.status === 'generated' }"><Sparkles :size="12" />写手</span>
-          <span>→</span>
-          <span :class="{ done: form.status === 'generated' }"><ShieldCheck :size="12" />审核官</span>
-          <span>→</span>
-          <span :class="{ done: form.status === 'generated' }"><ShieldCheck :size="12" />编辑总监</span>
-        </div>
-        <div class="studio-actions">
-          <button class="button button-ghost" type="button" :disabled="saving || isBackgroundGenerating" @click="handleSaveAction">
-            <LoaderCircle v-if="saving" class="spin" :size="15" /><Save v-else :size="15" />{{ ['generated', 'published'].includes(form.status) ? '保存修改' : '保存草稿' }}
-          </button>
-          <button
-            v-if="form.status === 'generated' && form.content"
-            class="button button-signal"
-            type="button"
-            :disabled="generating || saving"
-            @click="openPublishCenter"
-          >
-            <Send :size="15" />发布
-          </button>
-          <button class="button button-signal" type="button" :disabled="generating || saving || isBackgroundGenerating" @click="handleGenerate">
-            <LoaderCircle v-if="generating" class="spin" :size="15" /><Sparkles v-else :size="15" />
-            {{ generating ? '正在提交后台任务…' : (isBackgroundGenerating ? '后台生成中…' : '生成文章') }}
-          </button>
-        </div>
-      </header>
-
-      <section class="mobile-research-first">
-        <header>
-          <span>01 / 先搜索文章</span>
-          <h2>搜索并选择参考文章</h2>
-          <p>先确定主题和原文，再继续选择类型、标题和表达方式。</p>
-        </header>
-        <div class="mobile-research-controls">
-          <select v-model="selectedSourceId" aria-label="选择文章来源" @change="selectSourceSite(selectedSourceSite)">
-            <option v-for="site in sourceSites" :key="site.id" :value="site.id">{{ site.name }}</option>
-          </select>
-          <div class="mobile-public-search-note">
-            <Globe2 :size="14" />
-            无需登录，直接检索公开文章；首次最多显示 20 篇，还可以继续加载。
-          </div>
-          <button class="mobile-custom-site-trigger" type="button" @click="showCustomSite = !showCustomSite">
-            <Link2 :size="14" />{{ showCustomSite ? '收起自定义网址' : '添加自定义网址查找' }}
-          </button>
-          <div v-if="showCustomSite" class="custom-site-input mobile-custom-site-input">
-            <Link2 :size="14" />
-            <div class="custom-site-fields">
-              <label><span>网站名称</span><input v-model="customSiteName" class="custom-site-name" placeholder="如：AI前线" /></label>
-              <label><span>网站地址</span><input v-model="customSiteUrl" placeholder="https://example.com/" @keyup.enter="addCustomSite" /></label>
-            </div>
-            <button type="button" @click="addCustomSite">添加并查找</button>
-            <button type="button" aria-label="关闭" @click="showCustomSite = false"><X :size="13" /></button>
-          </div>
-          <div class="research-input">
-            <Search :size="17" />
-            <input v-model="searchQuery" placeholder="输入文章标题或关键词" @keyup.enter="discoverMobile" />
-            <button type="button" :disabled="discovering" @click="discoverMobile">
-              <LoaderCircle v-if="discovering" class="spin" :size="15" />{{ discovering ? '查找中' : '查找' }}
-            </button>
-          </div>
-          <div v-if="searchResults.length" class="mobile-source-filters">
-            <label><CalendarDays :size="13" /><select v-model="sourceDateFilter" :disabled="discovering" @change="refreshSourceFilters">
-              <option value="all">不限日期</option>
-              <option value="7d">近 7 天</option>
-              <option value="30d">近 30 天</option>
-              <option value="1y">近 1 年</option>
-            </select></label>
-            <label><ArrowUpDown :size="13" /><select v-model="sourceSort" :disabled="discovering" @change="refreshSourceFilters">
-              <option value="newest">日期从新到旧</option>
-              <option value="oldest">日期从旧到新</option>
-            </select></label>
-          </div>
-        </div>
-        <div v-if="searchResults.length" class="mobile-source-list">
-          <article
-            v-for="(source, index) in visibleSearchResults"
-            :key="source.url"
-            class="mobile-source-card"
-            :class="{ selected: sourceSelected(source) }"
-          >
-            <button type="button" :disabled="Boolean(loadingSourceUrl)" @click="toggleSource(source)">
-              <span>{{ String(index + 1).padStart(2, '0') }}</span>
-              <div>
-                <small>
-                  {{ source.source || '网页来源' }} · {{ source.publish_date || '日期未知' }} ·
-                  {{ source.word_count ? `约 ${source.word_count.toLocaleString()} 字` : '选中后统计字数' }}
-                </small>
-                <strong>{{ source.title }}</strong>
-                <p v-if="loadingSourceUrl === source.url">正在深度提取正文…</p>
-                <p v-else>{{ sourceSelected(source) && source.source_content ? '正文已提取，可以生成文章' : '点击后提取完整正文' }}</p>
-              </div>
-              <LoaderCircle v-if="loadingSourceUrl === source.url" class="spin" :size="15" />
-              <Check v-else :size="15" />
-            </button>
-            <a :href="source.url" target="_blank" rel="noreferrer"><ExternalLink :size="12" />打开原文</a>
-          </article>
-          <button class="mobile-more-sources" type="button" :disabled="loadingMore" @click="loadMoreMobileSources">
-            <LoaderCircle v-if="loadingMore" class="spin" :size="14" /><Plus v-else :size="14" />
-            {{ loadingMore ? '继续查找中…' : '查找更多文章' }}
-          </button>
-        </div>
-        <div v-else class="mobile-research-empty">
-          <Search :size="22" />输入主题后，查找到的文章会优先显示在这里。
-        </div>
-      </section>
-
-      <div class="studio-grid preference-studio">
-        <aside class="source-desk">
-          <div class="desk-body guided-desk">
-            <section class="choice-section topic-section">
-              <div class="choice-heading"><span>01</span><div><strong>输入主题或关键词</strong><small>自动扩展相关说法，并优先显示最近发布的文章</small></div></div>
-              <div class="source-picker-label"><Globe2 :size="13" />从哪里查找相似文章</div>
-              <div class="source-site-picker">
-                <div
-                  v-for="site in sourceSites"
-                  :key="site.id"
-                  class="source-site-item"
-                  :class="{ selected: selectedSourceId === site.id }"
-                >
-                  <button type="button" @click="selectSourceSite(site)">
-                    <Check :size="11" />{{ site.name }}<i v-if="isSiteLoggedIn(site)" class="login-dot">已登录</i>
+    if (saved) showNotice('文章修改已保…6129 tokens truncated…site)" class="login-dot">已登录</i>
                   </button>
                   <a v-if="site.url" :href="site.url" target="_blank" rel="noreferrer" :aria-label="`打开${site.name}`" @click="beginSiteLogin(site)">
                     <ExternalLink :size="10" />
@@ -1217,7 +633,15 @@ onBeforeUnmount(() => {
               </div>
               <div class="research-input">
                 <Search :size="17" />
-                <input v-model="searchQuery" placeholder="例如：AI 应用、Codex、牛油果营养" @keyup.enter="discover" />
+                <input v-model="searchQuery" placeholder="例如：AI 应用、Codex、牛油果营养" @input="handleSearchQueryInput" @keyup.enter="discover" />
+                <button
+                  v-if="searchQuery"
+                  class="research-clear-button"
+                  type="button"
+                  aria-label="清空本次查询"
+                  title="清空本次查询"
+                  @click="clearResearchQuery"
+                ><X :size="14" /></button>
                 <button type="button" :disabled="discovering" @click="discover">
                   <LoaderCircle v-if="discovering" class="spin" :size="15" />{{ discovering ? '准备中' : '开始' }}
                 </button>
@@ -1235,27 +659,18 @@ onBeforeUnmount(() => {
             </section>
 
             <section class="choice-section">
-              <div class="choice-heading"><span>03</span><div><strong>表达风格</strong></div></div>
-              <input
+              <div class="choice-heading"><span>03</span><div><strong>表达风格与提示词</strong></div></div>
+              <textarea
                 v-model="form.writing_style"
-                class="custom-preference-input"
-                maxlength="64"
-                placeholder="例如：冷静专业、富有人情、生动有趣、简洁直给"
-              />
+                class="custom-preference-input writing-instruction-input"
+                maxlength="1000"
+                rows="3"
+                :placeholder="DEFAULT_WRITING_INSTRUCTION"
+              ></textarea>
             </section>
 
             <section class="choice-section">
-              <div class="choice-heading"><span>04</span><div><strong>提示词</strong></div></div>
-              <input
-                v-model="form.project_background"
-                class="custom-preference-input"
-                maxlength="500"
-                placeholder="例如：保留原文事实，用更自然、更有人情味的方式重新叙述"
-              />
-            </section>
-
-            <section class="choice-section">
-              <div class="choice-heading"><span>05</span><div><strong>字数与发布平台</strong></div></div>
+              <div class="choice-heading"><span>04</span><div><strong>字数与发布平台</strong></div></div>
               <div class="custom-word-count-picker">
                 <div>
                   <strong>生成字数</strong>
