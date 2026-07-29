@@ -1,0 +1,64 @@
+services:
+  article_workshop_db:
+    image: docker.m.daocloud.io/library/postgres:16-alpine
+    container_name: article_workshop_db
+    restart: always
+    environment:
+      POSTGRES_DB: ai_tech_articles
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-123456}
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ai_tech_articles"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - article_workshop_internal
+
+  article_workshop_api:
+    build: ./backend
+    container_name: article_workshop_api
+    restart: always
+    env_file:
+      - .env.production
+    volumes:
+      # 设置页面写入容器内 /.env；绑定到主机后，模型方案与 Token
+      # 在容器重建、服务器重启后仍会保留。
+      - ./.env.production:/.env
+    environment:
+      APP_NAME: 文章工坊
+      APP_ENV: production
+      APP_BASE_PATH: /article-workshop
+      DATABASE_URL: postgresql+psycopg://postgres:${POSTGRES_PASSWORD:-123456}@article_workshop_db:5432/ai_tech_articles
+      POSTGRES_HOST: article_workshop_db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-123456}
+      POSTGRES_DB: ai_tech_articles
+      CORS_ORIGINS: ${PUBLIC_ORIGIN:-http://117.72.246.88}
+    depends_on:
+      article_workshop_db:
+        condition: service_healthy
+    networks:
+      - article_workshop_internal
+      - public_network
+
+  article_workshop_web:
+    build:
+      context: ./frontend
+      args:
+        VITE_PUBLIC_BASE: /article-workshop/
+        VITE_API_BASE_URL: /article-workshop/api
+    container_name: article_workshop_web
+    restart: always
+    networks:
+      - public_network
+
+networks:
+  article_workshop_internal:
+    name: article_workshop_internal
+  public_network:
+    external: true
+    name: ${PUBLIC_NETWORK}
