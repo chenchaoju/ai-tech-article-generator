@@ -10,6 +10,7 @@ class ResearchRequest(BaseModel):
     source_domain: str = Field(default="", max_length=255)
     source_name: str = Field(default="", max_length=100)
     title_only: bool = True
+    broad_search: bool = False
     date_range: Literal["all", "7d", "30d", "1y"] = "all"
     sort_order: Literal["newest", "oldest"] = "newest"
 

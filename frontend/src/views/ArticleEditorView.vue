@@ -594,7 +594,13 @@ async function handleSaveAction() {
   showNotice('草稿已保存，创作台已清空，可以开始下一篇文章')
 }
 
-async function discover() {
+function usesMobileResearch() {
+  return typeof window !== 'undefined' && window.matchMedia('(max-width: 780px)').matches
+}
+
+async function discover(requestCount = 10, broadSearch = false) {
+  requestCount = Number.isInteger(requestCount) ? requestCount : 10
+  broadSearch = broadSearch === true
   const query = (searchQuery.value || form.topic).trim()
   if (!query) {
     showNotice('先输入想查找的主题或关键词', 'error')
@@ -614,8 +620,9 @@ async function discover() {
   try {
     try {
       const sources = await articleApi.research(query, {
-        count: 10,
+        count: requestCount,
         title_only: true,
+        broad_search: broadSearch,
         exclude_urls: [],
         source_domain: selectedSourceSite.value.domain,
         source_name: selectedSourceSite.value.name,
@@ -661,12 +668,19 @@ async function discover() {
   }
 }
 
-async function loadMoreSources() {
+function discoverMobile() {
+  return discover(20, true)
+}
+
+async function loadMoreSources(requestCount = 10, broadSearch = false) {
+  requestCount = Number.isInteger(requestCount) ? requestCount : 10
+  broadSearch = broadSearch === true
   loadingMore.value = true
   try {
     const data = await articleApi.research(form.topic, {
-      count: 10,
+      count: requestCount,
       title_only: true,
+      broad_search: broadSearch,
       exclude_urls: searchResults.value.map((item) => item.url),
       source_domain: selectedSourceSite.value.domain,
       source_name: selectedSourceSite.value.name,
@@ -684,14 +698,20 @@ async function loadMoreSources() {
   }
 }
 
+function loadMoreMobileSources() {
+  return loadMoreSources(20, true)
+}
+
 async function refreshSourceFilters() {
   const query = (searchQuery.value || form.topic).trim()
   if (!query || discovering.value) return
   discovering.value = true
   try {
+    const mobileResearch = usesMobileResearch()
     const data = await articleApi.research(query, {
       count: 20,
       title_only: true,
+      broad_search: mobileResearch,
       exclude_urls: [],
       source_domain: selectedSourceSite.value.domain,
       source_name: selectedSourceSite.value.name,
@@ -726,7 +746,10 @@ function selectSourceSite(site) {
   sourceSort.value = 'newest'
   sourceDateFilter.value = 'all'
   searchResults.value = []
-  if ((searchQuery.value || form.topic).trim()) discover()
+  if ((searchQuery.value || form.topic).trim()) {
+    if (usesMobileResearch()) discoverMobile()
+    else discover()
+  }
 }
 
 function addCustomSite() {
@@ -1080,14 +1103,9 @@ onBeforeUnmount(() => {
           <select v-model="selectedSourceId" aria-label="选择文章来源" @change="selectSourceSite(selectedSourceSite)">
             <option v-for="site in sourceSites" :key="site.id" :value="site.id">{{ site.name }}</option>
           </select>
-          <div v-if="selectedSourceSite.url" class="mobile-source-login-row">
-            <a :href="selectedSourceSite.url" target="_blank" rel="noreferrer" @click="beginSiteLogin(selectedSourceSite)">
-              <ExternalLink :size="13" />{{ isSiteLoggedIn(selectedSourceSite) ? `重新登录${selectedSourceSite.name}` : `打开${selectedSourceSite.name}登录` }}
-            </a>
-            <button v-if="pendingLoginSite?.id === selectedSourceSite.id" type="button" @click="confirmSiteLogin(selectedSourceSite)">
-              <ShieldCheck :size="13" />{{ isSiteLoggedIn(selectedSourceSite) ? '刷新登录状态' : '我已完成登录' }}
-            </button>
-            <small v-if="isSiteLoggedIn(selectedSourceSite)">已登录 · {{ loginStateTime(selectedSourceSite) }}</small>
+          <div class="mobile-public-search-note">
+            <Globe2 :size="14" />
+            无需登录，直接检索公开文章；首次最多显示 20 篇，还可以继续加载。
           </div>
           <button class="mobile-custom-site-trigger" type="button" @click="showCustomSite = !showCustomSite">
             <Link2 :size="14" />{{ showCustomSite ? '收起自定义网址' : '添加自定义网址查找' }}
@@ -1103,8 +1121,8 @@ onBeforeUnmount(() => {
           </div>
           <div class="research-input">
             <Search :size="17" />
-            <input v-model="searchQuery" placeholder="输入文章标题或关键词" @keyup.enter="discover" />
-            <button type="button" :disabled="discovering" @click="discover">
+            <input v-model="searchQuery" placeholder="输入文章标题或关键词" @keyup.enter="discoverMobile" />
+            <button type="button" :disabled="discovering" @click="discoverMobile">
               <LoaderCircle v-if="discovering" class="spin" :size="15" />{{ discovering ? '查找中' : '查找' }}
             </button>
           </div>
@@ -1144,7 +1162,7 @@ onBeforeUnmount(() => {
             </button>
             <a :href="source.url" target="_blank" rel="noreferrer"><ExternalLink :size="12" />打开原文</a>
           </article>
-          <button class="mobile-more-sources" type="button" :disabled="loadingMore" @click="loadMoreSources">
+          <button class="mobile-more-sources" type="button" :disabled="loadingMore" @click="loadMoreMobileSources">
             <LoaderCircle v-if="loadingMore" class="spin" :size="14" /><Plus v-else :size="14" />
             {{ loadingMore ? '继续查找中…' : '查找更多文章' }}
           </button>

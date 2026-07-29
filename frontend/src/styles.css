@@ -1015,6 +1015,8 @@ code { font-family: var(--mono); }
   .mobile-custom-site-trigger { min-height: 40px; display: flex; align-items: center; justify-content: center; gap: 6px; color: var(--ink); border: 1px solid var(--line); background: #f8f8f5; font-size: 9px; font-weight: 700; }
   .mobile-custom-site-input { margin: 0; }
   .mobile-custom-site-input .custom-site-fields { grid-template-columns: 1fr; }
+  .mobile-public-search-note { min-height: 38px; display: flex; align-items: center; gap: 7px; padding: 8px 10px; color: #315d3f; border-left: 3px solid #58a16d; background: #eef8f1; font-size: 9px; line-height: 1.55; }
+  .mobile-public-search-note svg { flex: 0 0 auto; }
   .mobile-source-login-row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 6px; padding: 8px; border: 1px solid #d8dce8; background: #f5f7ff; }
   .mobile-source-login-row a, .mobile-source-login-row button { min-height: 34px; display: flex; align-items: center; justify-content: center; gap: 5px; padding: 0 9px; border: 1px solid #aeb8d5; background: #fff; color: #273765; font-size: 9px; }
   .mobile-source-login-row small { grid-column: 1 / -1; color: #2e744d; font-size: 8px; }

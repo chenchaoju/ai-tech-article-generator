@@ -1837,11 +1837,11 @@ async def search_web(
     source_domain: str = "",
     source_name: str = "",
     title_only: bool = True,
+    broad_search: bool = False,
     include_images: bool = True,
     date_range: str = "all",
     sort_order: str = "newest",
 ) -> list[dict[str, str]]:
-    _ensure_api_key()
     excluded = {url.rstrip("/") for url in (exclude_urls or [])}
     requested_domain = source_domain.strip().lower().removeprefix("www.")
     search_expression = _fuzzy_search_expression(query)
@@ -1900,27 +1900,28 @@ async def search_web(
     if requested_domain:
         payload["search_domain_filter"] = requested_domain
     raw_items: list[dict[str, Any]] = []
-    try:
-        async with httpx.AsyncClient(
-            timeout=35,
-            proxy=settings.glm_proxy_url or None,
-        ) as client:
-            response = await client.post(
-                f"{settings.glm_base_url.rstrip('/')}/web_search",
-                headers=_headers(),
-                json=payload,
-            )
-        if not response.is_error:
-            response_data = response.json()
-            usage = response_data.get("usage") or {}
-            record_token_usage(
-                prompt_tokens=int(usage.get("prompt_tokens") or 0),
-                completion_tokens=int(usage.get("completion_tokens") or 0),
-                total_tokens=int(usage.get("total_tokens") or 0),
-            )
-            raw_items = response_data.get("search_result", [])
-    except (httpx.RequestError, ValueError):
-        raw_items = []
+    if settings.glm_api_key.strip():
+        try:
+            async with httpx.AsyncClient(
+                timeout=35,
+                proxy=settings.glm_proxy_url or None,
+            ) as client:
+                response = await client.post(
+                    f"{settings.glm_base_url.rstrip('/')}/web_search",
+                    headers=_headers(),
+                    json=payload,
+                )
+            if not response.is_error:
+                response_data = response.json()
+                usage = response_data.get("usage") or {}
+                record_token_usage(
+                    prompt_tokens=int(usage.get("prompt_tokens") or 0),
+                    completion_tokens=int(usage.get("completion_tokens") or 0),
+                    total_tokens=int(usage.get("total_tokens") or 0),
+                )
+                raw_items = response_data.get("search_result", [])
+        except (httpx.RequestError, ValueError):
+            raw_items = []
 
     if direct_task:
         try:
@@ -1993,22 +1994,32 @@ async def search_web(
             if requested_domain.endswith("zhihu.com")
             else requested_domain
         )
-        fallback_batches = await asyncio.gather(
-            _search_bing(
-                query=query,
-                source_domain=fallback_domain,
-                source_name=source_name,
-                excluded_urls=metadata_excluded,
-                count=pool_count,
-            ),
-            _search_sogou(
-                query=query,
-                source_domain=fallback_domain,
-                source_name=source_name,
-                excluded_urls=metadata_excluded,
-                count=pool_count,
-            ),
+        fallback_queries = (
+            (_search_query_variants(query)[:4] or [query])
+            if broad_search
+            else [query]
         )
+        fallback_tasks = []
+        for fallback_query in fallback_queries:
+            fallback_tasks.extend(
+                [
+                    _search_bing(
+                        query=fallback_query,
+                        source_domain=fallback_domain,
+                        source_name=source_name,
+                        excluded_urls=metadata_excluded,
+                        count=pool_count,
+                    ),
+                    _search_sogou(
+                        query=fallback_query,
+                        source_domain=fallback_domain,
+                        source_name=source_name,
+                        excluded_urls=metadata_excluded,
+                        count=pool_count,
+                    ),
+                ]
+            )
+        fallback_batches = await asyncio.gather(*fallback_tasks)
         fallback_metadata = [
             item
             for batch in fallback_batches

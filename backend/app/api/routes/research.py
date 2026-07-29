@@ -24,6 +24,7 @@ async def research_topic(payload: ResearchRequest) -> ResearchResponse:
             source_domain=payload.source_domain,
             source_name=payload.source_name,
             title_only=payload.title_only,
+            broad_search=payload.broad_search,
             include_images=False,
             date_range=payload.date_range,
             sort_order=payload.sort_order,

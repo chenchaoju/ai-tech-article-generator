@@ -311,6 +311,7 @@ def test_research_and_title_routes(monkeypatch) -> None:
         source_domain,
         source_name,
         title_only,
+        broad_search,
         include_images,
         date_range,
         sort_order,
@@ -320,6 +321,7 @@ def test_research_and_title_routes(monkeypatch) -> None:
         assert source_domain == "toutiao.com"
         assert source_name == "今日头条"
         assert title_only is True
+        assert broad_search is False
         assert include_images is False
         assert date_range == "all"
         assert sort_order == "newest"
