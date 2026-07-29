@@ -17,12 +17,17 @@ from app.api.routes.settings import _normalize_base_url
 from app.services.glm import (
     ARTICLE_DISCLAIMER,
     _build_text_change_records,
+    _cache_source_content,
     _clean_research_text,
     _enrich_search_metadata,
     _extract_json_ld_article,
     _extract_page_publish_date,
+    _filter_extractable_metadata,
     _finalize_search_metadata,
     _finalize_search_results,
+    _get_cached_source_content,
+    _is_toutiao_detail_url,
+    _is_usable_selected_body,
     _parse_csdn_results,
     _parse_juejin_results,
     _search_query_variants,
@@ -456,271 +461,76 @@ def test_search_metadata_keeps_candidates_without_body_text() -> None:
     assert results[0]["word_count"] == 0
 
 
-def test_search_material_filters_short_pages_and_removes_heading_markers() -> None:
-    cleaned = _clean_research_text("# 抓取标题\n\n## 正文\n" + "内容" * 100)
-    assert "# 抓取标题" not in cleaned
-    assert "抓取标题" in cleaned
-
-    results = _usable_search_results(
+def test_search_metadata_rejects_homepages_and_caches_preloaded_body() -> None:
+    cache_url = f"https://example.com/article/{uuid4().hex}"
+    body = "可验证的完整正文。" * 80
+    results = _finalize_search_metadata(
         [
             {
-                "title": "过短结果",
-                "url": "https://example.com/short",
-                "source_content": "很短",
-                "word_count": 2,
+                "title": "站点首页",
+                "url": "https://example.com/",
+                "summary": "首页导航",
+                "source": "测试站点",
             },
             {
-                "title": "完整结果",
-                "url": "https://example.com/long",
-                "source_content": "# 原文标题\n" + "内容" * 100,
-                "word_count": 0,
+                "title": "## _AI应用_落地实践",
+                "url": cache_url,
+                "summary": "文章摘要",
+                "source_content": body,
+                "source": "测试站点",
             },
         ],
+        "AI应用",
         10,
     )
-    assert [item["title"] for item in results] == ["完整结果"]
-    assert results[0]["word_count"] >= 200
-    assert "# 原文标题" not in results[0]["source_content"]
+    assert [item["title"] for item in results] == ["AI应用落地实践"]
+    assert results[0]["source_content"] == ""
+    cached = _get_cached_source_content(cache_url)
+    assert cached is not None
+    assert cached["source_content"] == body
+    assert cached["word_count"] >= 200
 
 
-def test_juejin_native_results_use_full_content_and_strict_latin_relevance() -> None:
-    payload = {
-        "data": [
-            {
-                "result_type": 2,
-                "result_model": {
-                    "article_id": "123",
-                    "article_info": {
-                        "article_id": "123",
-                        "title": "Codex 从安装到实战",
-                        "brief_content": "简短摘要",
-                        "content": "# Codex 从安装到实战\n\n" + "完整正文" * 80,
-                        "ctime": 1784004703,
-                    },
-                },
-            },
-            {
-                "result_type": 2,
-                "result_model": {
-                    "article_id": "456",
-                    "article_info": {
-                        "article_id": "456",
-                        "title": "AlphaCode 模型学习笔记",
-                        "brief_content": "名称里有相似字母，但不是 Codex",
-                        "content": "其他正文" * 80,
-                        "ctime": 1784004703,
-                    },
-                },
-            },
-        ]
-    }
-    items = _parse_juejin_results(
-        payload,
-        query="codex",
-        source_name="掘金",
-        excluded_urls=set(),
-    )
-    assert [item["title"] for item in items] == ["Codex 从安装到实战"]
-    assert items[0]["word_count"] >= 200
-    assert not items[0]["source_content"].startswith("#")
-    assert _title_match_score(
-        "codex",
-        {"title": "AlphaCode 模型学习笔记"},
-    ) == 0
+def test_extractable_metadata_only_returns_hydrated_articles(monkeypatch) -> None:
+    good_url = f"https://example.com/good/{uuid4().hex}"
+    bad_url = f"https://example.com/bad/{uuid4().hex}"
 
-
-def test_fuzzy_query_expansion_and_newest_real_date_priority() -> None:
-    variants = _search_query_variants("AI应用")
-    assert "AI应用" in variants
-    assert any("人工智能" in item or "大模型" in item for item in variants)
-    assert _title_match_score(
-        "AI应用",
-        {"title": "DevSecOps 智能化：Gitee 分层 AI 落地实践"},
-    ) > 0
-
-    sorted_items = _sort_search_results(
-        [
-            {
-                "title": "检索当天才发现的旧文章",
-                "publish_date": "2026-07-28",
-                "date_type": "检索日期",
-                "word_count": 900,
-            },
-            {
-                "title": "AI 工具的新进展",
-                "publish_date": "2026-07-27",
-                "date_type": "发布日期",
-                "word_count": 500,
-            },
-            {
-                "title": "AI 应用的较早文章",
-                "publish_date": "2026-06-01",
-                "date_type": "发布日期",
-                "word_count": 1000,
-            },
-        ],
-        "AI应用",
-    )
-    assert [item["title"] for item in sorted_items] == [
-        "AI 工具的新进展",
-        "AI 应用的较早文章",
-        "检索当天才发现的旧文章",
-    ]
-
-
-def test_csdn_native_results_keep_full_body_and_clean_url() -> None:
-    payload = {
-        "result_vos": [
-            {
-                "title": "AI <em>应用</em>开发实践",
-                "url": "https://blog.csdn.net/demo/article/details/123?utm_source=test",
-                "body": "完整正文" * 100,
-                "description": "摘要",
-                "nickname": "测试作者",
-                "created_at": "2026-07-28 10:00:00",
-            }
-        ]
-    }
-    items = _parse_csdn_results(
-        payload,
-        query="AI应用",
-        source_name="CSDN",
-        excluded_urls=set(),
-    )
-    assert len(items) == 1
-    assert items[0]["title"] == "AI 应用 开发实践"
-    assert items[0]["url"] == "https://blog.csdn.net/demo/article/details/123"
-    assert items[0]["word_count"] >= 200
-    assert items[0]["publish_date"] == "2026-07-28"
-
-
-def test_json_ld_article_is_a_full_text_fallback() -> None:
-    from bs4 import BeautifulSoup
-
-    soup = BeautifulSoup(
-        """
-        <script type="application/ld+json">
-        {
-          "@type": "Article",
-          "datePublished": "2026-07-28T10:00:00+08:00",
-          "articleBody": "完整文章正文内容完整文章正文内容完整文章正文内容完整文章正文内容完整文章正文内容完整文章正文内容完整文章正文内容完整文章正文内容完整文章正文内容完整文章正文内容",
-          "image": "https://example.com/cover.jpg"
+    async def fake_fetch(item):
+        if item["url"] == bad_url:
+            raise RuntimeError("正文无法提取")
+        return {
+            **item,
+            "source_content": "正文内容。" * 100,
+            "word_count": 500,
+            "publish_date": "2026-07-29",
+            "date_type": "发布日期",
         }
-        </script>
-        """,
-        "html.parser",
-    )
-    article = _extract_json_ld_article(soup)
-    assert article["content"].startswith("完整文章正文")
-    assert article["publish_date"] == "2026-07-28"
-    assert article["image_url"] == "https://example.com/cover.jpg"
 
-
-def test_cnblogs_publish_date_uses_page_metadata_not_crawl_date() -> None:
-    from bs4 import BeautifulSoup
-
-    soup = BeautifulSoup(
-        """
-        <html><head>
-          <script type="application/ld+json">
-            {
-              "@context": "https://schema.org",
-              "@type": "BlogPosting",
-              "headline": "AI 大模型应用",
-              "datePublished": "2024-01-04T11:47:00+08:00"
-            }
-          </script>
-        </head><body>
-          <span id="post-date">2024-01-04 11:47</span>
-        </body></html>
-        """,
-        "html.parser",
-    )
-    assert _extract_json_ld_article(soup)["publish_date"] == "2024-01-04"
-    assert _extract_page_publish_date(soup, "www.cnblogs.com") == "2024-01-04"
-
-
-def test_unknown_publish_date_is_not_replaced_with_today() -> None:
-    items = asyncio.run(
-        _enrich_search_metadata(
+    monkeypatch.setattr("app.services.glm.fetch_source_content", fake_fetch)
+    results = asyncio.run(
+        _filter_extractable_metadata(
             [
                 {
-                    "title": "无日期文章",
-                    "url": "",
-                    "summary": "正文" * 120,
-                    "source_content": "正文" * 120,
+                    "title": "可以提取的文章",
+                    "url": good_url,
                     "source": "测试站点",
-                    "publish_date": "",
-                    "date_type": "发布日期",
-                    "word_count": 240,
-                }
+                },
+                {
+                    "title": "无法提取的文章",
+                    "url": bad_url,
+                    "source": "测试站点",
+                },
             ],
-            include_images=False,
+            10,
         )
     )
-    assert items[0]["publish_date"] == ""
-    assert items[0]["date_type"] == "日期未知"
+    assert [item["url"] for item in results] == [good_url]
+    assert results[0]["source_content"] == ""
+    assert results[0]["word_count"] == 500
 
 
-def test_change_record_after_contains_only_changed_fragment() -> None:
-    records = _build_text_change_records(
-        "今天去公园散步，天气很好。",
-        "今天去公园慢慢散步，天气很好。",
-        "编辑总监",
-        "补充动作细节。",
-    )
-    assert records
-    assert records[0]["after"] == "慢慢"
-
-
-def test_persistent_image_library(monkeypatch) -> None:
-    async def fake_image_search(
-        query,
-        engine,
-        page,
-        count,
-        exclude_urls,
-        prefer_clean,
-    ):
-        assert query == "牛油果"
-        assert engine == "sohu"
-        assert page == 2
-        assert count == 10
-        assert exclude_urls == ["https://images.example.com/old.jpg"]
-        assert prefer_clean is True
-        return [
-            {
-                "title": f"清晰牛油果图片 {index}",
-                "source_page_url": f"https://example.com/avocado/{index}",
-                "source_name": "example.com",
-                "image_url": f"https://images.example.com/avocado-{index}.jpg",
-            }
-            for index in range(1, 11)
-        ]
-
-    monkeypatch.setattr(
-        "app.api.routes.media.search_image_provider",
-        fake_image_search,
-    )
-    asset_id = None
-    category_id = None
-    category_name = f"测试分类-{uuid4().hex[:8]}"
-    try:
-        with TestClient(app) as client:
-            searched = client.post(
-                "/api/media/search",
-                json={
-                    "query": "牛油果",
-                    "count": 10,
-                    "page": 2,
-                    "exclude_urls": ["https://images.example.com/old.jpg"],
-                    "engine": "sohu",
-                    "prefer_clean": True,
-                },
-            )
-            assert searched.status_code == 200
-            assert searched.json()["page"] == 2
-            assert searched.json()["engine"] == "sohu"
+def test_search_material_filters_short_pages_and_removes_heading_markers() -> None:
+    cleaned = _clean_research_text("# 抓取标题\n\n## 正文\n" + "内…2495 tokens truncated…= "sohu"
             assert searched.json()["has_more"] is True
             assert len(searched.json()["items"]) == 10
             item = searched.json()["items"][0]
@@ -1015,7 +825,8 @@ def test_four_role_generation_pipeline_records_each_role(monkeypatch) -> None:
     assert "【用户填写的表达风格】" not in api_prompts[0]
     assert "【用户填写的表达风格】" not in api_prompts[2]
     assert all(
-        "【用户提示词】\n请按照已选文章主题进行修改" in prompt
+        "【用户提示词】\n保留原文主题和观点，用更自然、更有人情味的方式重新叙述"
+        in prompt
         for prompt in api_prompts
     )
     assert all("只能依据原始材料解释主题" in prompt for prompt in api_prompts[1:])
