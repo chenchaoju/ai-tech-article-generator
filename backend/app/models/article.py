@@ -14,7 +14,10 @@ class Article(Base):
     topic: Mapped[str] = mapped_column(String(255), index=True)
     article_type: Mapped[str] = mapped_column(String(64), default="技术")
     custom_type_description: Mapped[str] = mapped_column(Text, default="")
-    writing_style: Mapped[str] = mapped_column(String(64), default="温暖同行")
+    writing_style: Mapped[str] = mapped_column(
+        Text,
+        default="保留原文主题和观点，用更自然、更有人情味的方式重新叙述",
+    )
     layout_style: Mapped[str] = mapped_column(String(64), default="跟随原文")
     target_word_count: Mapped[int] = mapped_column(Integer, default=1500)
     target_platform: Mapped[str] = mapped_column(

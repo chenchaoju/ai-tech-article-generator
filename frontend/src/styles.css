@@ -202,7 +202,7 @@ code { font-family: var(--mono); }
 .desk-intro h2 { margin: 8px 0 7px; font: 700 21px var(--serif); }
 .desk-intro p { max-width: 460px; margin: 0 0 22px; color: var(--ash); font-size: 10px; line-height: 1.75; }
 .research-input {
-  height: 47px; display: grid; grid-template-columns: auto 1fr auto; align-items: center;
+  height: 47px; display: grid; grid-template-columns: auto 1fr auto auto; align-items: center;
   gap: 9px; padding-left: 13px; border: 1px solid var(--ink); background: var(--white);
   box-shadow: 4px 4px 0 #cfcbc0;
 }
@@ -212,6 +212,10 @@ code { font-family: var(--mono); }
   gap: 5px; color: #111; border: 0; border-left: 1px solid var(--ink); background: var(--signal);
   font-size: 10px; font-weight: 700;
 }
+.research-input .research-clear-button {
+  min-width: 34px; padding: 0 8px; color: #77736c; border-left: 0; background: transparent;
+}
+.research-input .research-clear-button:hover { color: var(--ink); background: #f1efe8; }
 .selected-source-strip { margin: 22px 0 5px; padding: 14px; border-left: 3px solid var(--blue); background: #e8ebf7; }
 .strip-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; color: #5c6075; font: 500 8px var(--mono); }
 .strip-head strong { color: var(--blue); }
@@ -353,6 +357,9 @@ code { font-family: var(--mono); }
   border: 1px solid var(--blue); outline: 0; background: var(--white); font-size: 9px;
 }
 .custom-preference-input:focus { border-color: var(--ink); box-shadow: 3px 3px 0 #c8c2b6; }
+.writing-instruction-input {
+  min-height: 76px; height: auto; padding: 11px 12px; resize: vertical; line-height: 1.65;
+}
 .follow-source-layout-note { display: flex; align-items: flex-start; gap: 8px; padding: 11px; color: #3f475f; border-left: 3px solid var(--blue); background: #eceff8; }
 .follow-source-layout-note > svg { flex: 0 0 auto; margin-top: 1px; color: var(--blue); }
 .follow-source-layout-note span, .follow-source-layout-note strong, .follow-source-layout-note small { display: block; }

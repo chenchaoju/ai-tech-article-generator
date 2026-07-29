@@ -3,10 +3,11 @@ import html
 import ipaddress
 import json
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Any
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -26,8 +27,13 @@ ARTICLE_DISCLAIMER = (
     "声明：本文内容不构成投资、医疗、法律等专业建议，请咨询专业人士。"
 
 )
-DEFAULT_USER_PROMPT = "请按照已选文章主题进行修改"
+DEFAULT_USER_PROMPT = "保留原文主题和观点，用更自然、更有人情味的方式重新叙述"
 MIN_SOURCE_WORD_COUNT = 200
+SOURCE_CONTENT_CACHE_TTL_SECONDS = 30 * 60
+SOURCE_CONTENT_CACHE_LIMIT = 500
+SOURCE_CONTENT_FAILURE_TTL_SECONDS = 5 * 60
+_SOURCE_CONTENT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_SOURCE_CONTENT_FAILURE_CACHE: dict[str, float] = {}
 
 
 FACT_RULES = """必须遵守以下事实边界：
@@ -1066,6 +1072,126 @@ def _validate_public_article_url(value: str) -> str:
     return parsed.geturl()
 
 
+def _is_toutiao_article_url(value: str) -> bool:
+    """Keep real Toutiao article/video detail URLs, not topic aggregation pages."""
+    parsed = urlparse(str(value or "").strip())
+    host = parsed.netloc.lower().removeprefix("www.")
+    if not host.endswith("toutiao.com"):
+        return True
+    return bool(re.match(r"^/(?:article|group|item)/\d+/?$", parsed.path))
+
+
+def _is_toutiao_detail_url(value: str) -> bool:
+    parsed = urlparse(str(value or "").strip())
+    host = parsed.netloc.lower().removeprefix("www.")
+    return host.endswith("toutiao.com") and _is_toutiao_article_url(value)
+
+
+def _toutiao_reader_urls(value: str) -> list[str]:
+    """Build canonical URL fallbacks because the same Toutiao item has several routes."""
+    parsed = urlparse(value)
+    host = parsed.netloc.lower().removeprefix("www.")
+    if not host.endswith("toutiao.com"):
+        return [value]
+    item_match = re.search(r"/(?:article|group|item)/(\d+)", parsed.path)
+    if not item_match:
+        return [value]
+    item_id = item_match.group(1)
+    candidates = [
+        f"https://www.toutiao.com/article/{item_id}/",
+        f"https://www.toutiao.com/item/{item_id}/",
+        value,
+    ]
+    return list(dict.fromkeys(candidates))
+
+
+def _is_usable_selected_body(value: str, title: str, url: str) -> bool:
+    body = str(value or "").strip()
+    if _estimate_word_count(body) < MIN_SOURCE_WORD_COUNT:
+        return False
+    host = urlparse(url).netloc.lower().removeprefix("www.")
+    if not host.endswith("toutiao.com"):
+        return True
+    if not _is_toutiao_article_url(url):
+        return False
+    # A Toutiao video shell can be several hundred words long because it contains
+    # navigation and recommendations, but it has no article正文.
+    shell_signals = (
+        "视频加载失败",
+        "推荐视频",
+        "下载今日头条APP",
+        "自动连播",
+        "点击切换下一个视频",
+    )
+    if sum(signal in body for signal in shell_signals) >= 2:
+        return False
+    navigation_signals = ("关注", "推荐", "北京", "视频", "财经", "科技", "热点", "国际")
+    if sum(signal in body[:500] for signal in navigation_signals) >= 6:
+        return False
+    return True
+
+
+def _source_cache_key(value: str) -> str:
+    return str(value or "").strip().rstrip("/")
+
+
+def _cache_source_content(item: dict[str, Any]) -> None:
+    url = _source_cache_key(item.get("url", ""))
+    body = _clean_research_text(item.get("source_content", ""))[:20_000]
+    title = str(item.get("title") or "").strip()
+    if not url or not _is_usable_selected_body(body, title, url):
+        return
+    now = time.monotonic()
+    expired = [
+        key
+        for key, (expires_at, _) in _SOURCE_CONTENT_CACHE.items()
+        if expires_at <= now
+    ]
+    for key in expired:
+        _SOURCE_CONTENT_CACHE.pop(key, None)
+    while len(_SOURCE_CONTENT_CACHE) >= SOURCE_CONTENT_CACHE_LIMIT:
+        _SOURCE_CONTENT_CACHE.pop(next(iter(_SOURCE_CONTENT_CACHE)), None)
+    cached = dict(item)
+    cached["source_content"] = body
+    cached["word_count"] = _estimate_word_count(body)
+    cached.pop("image_url", None)
+    cached.pop("image_urls", None)
+    _SOURCE_CONTENT_CACHE[url] = (
+        now + SOURCE_CONTENT_CACHE_TTL_SECONDS,
+        cached,
+    )
+    _SOURCE_CONTENT_FAILURE_CACHE.pop(url, None)
+
+
+def _get_cached_source_content(value: str) -> dict[str, Any] | None:
+    key = _source_cache_key(value)
+    cached = _SOURCE_CONTENT_CACHE.get(key)
+    if not cached:
+        return None
+    expires_at, item = cached
+    if expires_at <= time.monotonic():
+        _SOURCE_CONTENT_CACHE.pop(key, None)
+        return None
+    return dict(item)
+
+
+def _source_content_recently_failed(value: str) -> bool:
+    key = _source_cache_key(value)
+    expires_at = _SOURCE_CONTENT_FAILURE_CACHE.get(key, 0)
+    if expires_at <= time.monotonic():
+        _SOURCE_CONTENT_FAILURE_CACHE.pop(key, None)
+        return False
+    return True
+
+
+def _mark_source_content_failure(value: str) -> None:
+    key = _source_cache_key(value)
+    if key:
+        _SOURCE_CONTENT_FAILURE_CACHE[key] = (
+            time.monotonic() + SOURCE_CONTENT_FAILURE_TTL_SECONDS
+        )
+
+
 def _clean_reader_markdown(value: str) -> str:
     body = str(value or "")
     if "Markdown Content:" in body:
@@ -1096,12 +1222,20 @@ async def fetch_source_content(source: dict[str, Any]) -> dict[str, Any]:
         "date_type": str(source.get("date_type") or "发布日期"),
         "word_count": max(0, int(source.get("word_count") or 0)),
     }
+    cached_item = _get_cached_source_content(item["url"])
+    if cached_item:
+        cached_item["title"] = item["title"] or cached_item.get("title", "")
+        cached_item["source"] = item["source"] or cached_item.get("source", "")
+        cached_item["publish_date"] = (
+            item["publish_date"] or cached_item.get("publish_date", "")
+        )
+        return cached_item
     host = urlparse(item["url"]).netloc.lower().removeprefix("www.")
     reader_first = host.endswith(("toutiao.com", "zhihu.com"))
     reader_text = ""
 
-    async def read_public_reader() -> str:
-        reader_url = f"https://r.jina.ai/{item['url']}"
+    async def read_public_reader(article_url: str) -> str:
+        reader_url = f"https://r.jina.ai/{article_url}"
         try:
             async with httpx.AsyncClient(
                 timeout=45,
@@ -1125,12 +1259,16 @@ async def fetch_source_content(source: dict[str, Any]) -> dict[str, Any]:
                 ):
                     item["publish_date"] = published_date
                     item["date_type"] = "发布日期"
-            return _clean_reader_markdown(response.text)
+            body = _clean_reader_markdown(response.text)
+            return body if _is_usable_selected_body(body, item["title"], article_url) else ""
         except (httpx.HTTPError, ValueError):
             return ""
 
     if reader_first:
-        reader_text = await read_public_reader()
+        for reader_candidate in _toutiao_reader_urls(item["url"]):
+            reader_text = await read_public_reader(reader_candidate)
+            if reader_text:
+                break
     if _estimate_word_count(reader_text) >= MIN_SOURCE_WORD_COUNT:
         item["source_content"] = reader_text[:20_000]
     else:
@@ -1142,7 +1280,7 @@ async def fetch_source_content(source: dict[str, Any]) -> dict[str, Any]:
             < MIN_SOURCE_WORD_COUNT
             and not reader_first
         ):
-            reader_text = await read_public_reader()
+            reader_text = await read_public_reader(item["url"])
             if _estimate_word_count(reader_text) >= MIN_SOURCE_WORD_COUNT:
                 item["source_content"] = reader_text[:20_000]
 
@@ -1151,6 +1289,12 @@ async def fetch_source_content(source: dict[str, Any]) -> dict[str, Any]:
     item["source_content"] = _clean_research_text(
         item.get("source_content", "")
     )[:20_000]
+    if not _is_usable_selected_body(
+        item["source_content"],
+        item["title"],
+        item["url"],
+    ):
+        item["source_content"] = ""
     item["word_count"] = _estimate_word_count(item["source_content"])
     if item["word_count"] < MIN_SOURCE_WORD_COUNT:
         raise ValueError(
@@ -1159,6 +1303,7 @@ async def fetch_source_content(source: dict[str, Any]) -> dict[str, Any]:
         )
     if not item["publish_date"]:
         item["date_type"] = "日期未知"
+    _cache_source_content(item)
     return item
 
 
@@ -1342,6 +1487,20 @@ def _search_query_variants(query: str) -> list[str]:
         variants.append(
             original.replace("问题", "排查").replace("报错", "排查修复")
         )
+    if (
+        len(set(variants)) == 1
+        and len(original) <= 16
+        and not re.search(r"\s", original)
+    ):
+        variants.extend(
+            [
+                f"{original} 科普",
+                f"{original} 经验",
+                f"{original} 方法",
+                f"{original} 知识",
+                f"{original} 技巧",
+            ]
+        )
 
     unique: list[str] = []
     seen: set[str] = set()
@@ -1444,11 +1603,14 @@ def _finalize_search_metadata(
             "",
             str(item.get("title") or ""),
         ).strip()
+        title = title.replace("**", "").replace("__", "").replace("_", "")
         url = str(item.get("url") or "").strip()
         normalized_url = url.rstrip("/")
+        parsed_url = urlparse(url)
         if (
             not title
             or not url.startswith(("http://", "https://"))
+            or parsed_url.path in {"", "/"}
             or normalized_url in seen_urls
             or _title_match_score(query, item) <= 0
         ):
@@ -1457,6 +1619,7 @@ def _finalize_search_metadata(
         item["title"] = title
         item["url"] = url
         item["summary"] = _clean_research_text(item.get("summary", ""))[:500]
+        _cache_source_content(item)
         item["source_content"] = ""
         item["publish_date"] = _normalize_date(item.get("publish_date", ""))
         item["date_type"] = "发布日期" if item["publish_date"] else "日期未知"
@@ -1489,6 +1652,54 @@ def _finalize_search_metadata(
     else:
         normalized_items = _sort_search_results(normalized_items, query)
     return normalized_items[:count]
+
+
+async def _filter_extractable_metadata(
+    items: list[dict[str, Any]],
+    count: int,
+) -> list[dict[str, Any]]:
+    """Preflight selectable results and cache正文 so every displayed item can open."""
+    if not items or count <= 0:
+        return []
+    candidate_limit = min(len(items), max(count + 10, count))
+    semaphore = asyncio.Semaphore(10)
+
+    async def validate(item: dict[str, Any]) -> dict[str, Any] | None:
+        url = str(item.get("url") or "")
+        if _source_content_recently_failed(url):
+            return None
+        try:
+            async with semaphore:
+                hydrated = await asyncio.wait_for(
+                    fetch_source_content(item),
+                    timeout=32,
+                )
+        except (
+            asyncio.TimeoutError,
+            httpx.HTTPError,
+            RuntimeError,
+            ValueError,
+            KeyError,
+            TypeError,
+        ):
+            _mark_source_content_failure(url)
+            return None
+        metadata = dict(item)
+        metadata["source_content"] = ""
+        metadata["word_count"] = int(hydrated.get("word_count") or 0)
+        metadata["publish_date"] = (
+            hydrated.get("publish_date") or metadata.get("publish_date") or ""
+        )
+        metadata["date_type"] = hydrated.get("date_type") or metadata.get(
+            "date_type",
+            "发布日期",
+        )
+        return metadata
+
+    validated = await asyncio.gather(
+        *(validate(dict(item)) for item in items[:candidate_limit])
+    )
+    return [item for item in validated if item is not None][:count]
 
 
 def _parse_juejin_results(
@@ -1537,7 +1748,7 @@ def _parse_juejin_results(
             "title": title,
             "url": url,
             "summary": summary,
-            "source_content": content[:4000],
+            "source_content": content[:20_000],
             "source": source_name.strip() or "掘金",
             "publish_date": _normalize_date(
                 article_info.get("ctime")
@@ -1676,7 +1887,7 @@ def _parse_csdn_results(
             "title": title,
             "url": url,
             "summary": summary,
-            "source_content": content[:4000],
+            "source_content": content[:20_000],
             "source": str(
                 raw_item.get("nickname")
                 or raw_item.get("author")
@@ -1790,26 +2001,31 @@ async def _search_zhihu_candidates(
     excluded_urls: list[str],
     count: int,
 ) -> list[dict[str, Any]]:
-    """Discover several Zhihu-column result sets before reader enrichment."""
+    """Discover Zhihu columns and long-form answers before reader enrichment."""
     variants = _search_query_variants(query)[:4] or [query]
+    zhihu_domains = ("zhuanlan.zhihu.com", "www.zhihu.com")
     tasks = [
         _search_sogou(
             query=variant,
-            source_domain="zhuanlan.zhihu.com",
+            source_domain=domain,
             source_name=source_name or "知乎",
             excluded_urls=excluded_urls,
             count=max(10, count),
         )
         for variant in variants
+        for domain in zhihu_domains
     ]
-    tasks.append(
-        _search_bing(
-            query=query,
-            source_domain="zhuanlan.zhihu.com",
-            source_name=source_name or "知乎",
-            excluded_urls=excluded_urls,
-            count=max(10, count),
-        )
+    tasks.extend(
+        [
+            _search_bing(
+                query=query,
+                source_domain=domain,
+                source_name=source_name or "知乎",
+                excluded_urls=excluded_urls,
+                count=max(10, count),
+            )
+            for domain in zhihu_domains
+        ]
     )
     batches = await asyncio.gather(*tasks, return_exceptions=True)
     seen = {url.rstrip("/") for url in excluded_urls}
@@ -1969,15 +2185,25 @@ async def search_web(
     candidates = [
         item for item in candidates if _title_match_score(query, item) > 0
     ]
+    if requested_domain.endswith("toutiao.com"):
+        candidates = [
+            item
+            for item in candidates
+            if _is_toutiao_detail_url(str(item.get("url") or ""))
+        ]
     candidates = _sort_search_results(candidates, query)
 
     if title_only:
-        metadata_results = _finalize_search_metadata(
+        metadata_candidates = _finalize_search_metadata(
             direct_results + candidates,
             query,
-            count,
+            min(pool_count, count + 10),
             date_range,
             sort_order,
+        )
+        metadata_results = await _filter_extractable_metadata(
+            metadata_candidates,
+            count,
         )
         if len(metadata_results) >= count:
             return metadata_results
@@ -1996,7 +2222,7 @@ async def search_web(
         )
         fallback_queries = (
             (_search_query_variants(query)[:4] or [query])
-            if broad_search
+            if broad_search or requested_domain
             else [query]
         )
         fallback_tasks = []
@@ -2025,13 +2251,20 @@ async def search_web(
             for batch in fallback_batches
             for item in batch
         ]
-        return _finalize_search_metadata(
+        if requested_domain.endswith("toutiao.com"):
+            fallback_metadata = [
+                item
+                for item in fallback_metadata
+                if _is_toutiao_detail_url(str(item.get("url") or ""))
+            ]
+        combined_metadata = _finalize_search_metadata(
             direct_results + candidates + fallback_metadata,
             query,
-            count,
+            min(pool_count, count + 10),
             date_range,
             sort_order,
         )
+        return await _filter_extractable_metadata(combined_metadata, count)
 
     # Prefer different websites first, then fill remaining slots with other
     # unique articles. This gives users visibly broader source choices.
@@ -2100,6 +2333,12 @@ async def search_web(
         for batch in fallback_batches
         for item in batch
     ]
+    if requested_domain.endswith("toutiao.com"):
+        fallback = [
+            item
+            for item in fallback
+            if _is_toutiao_detail_url(str(item.get("url") or ""))
+        ]
     fallback = await _enrich_search_metadata(
         fallback[:pool_count],
         include_images=include_images,
@@ -2184,6 +2423,12 @@ async def _search_toutiao(
             return date_match.group(0).replace("/", "-").replace(".", "-") if date_match else ""
         return ""
 
+    def clean_word_count(value: Any) -> int:
+        try:
+            return max(0, int(float(value or 0)))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
     def walk(value: Any, bucket: list[dict[str, str]]) -> None:
         if len(bucket) >= per_variant:
             return
@@ -2204,6 +2449,12 @@ async def _search_toutiao(
                 or ""
             )
             normalized = url.rstrip("/") if isinstance(url, str) else ""
+            is_video = bool(
+                value.get("has_video")
+                or value.get("video_url")
+                or str(value.get("media_type") or "") == "2"
+                or str(value.get("content_schema_type") or "") == "3"
+            )
             raw_host = (
                 urlparse(raw_url).netloc.lower().removeprefix("www.")
                 if isinstance(raw_url, str)
@@ -2214,6 +2465,8 @@ async def _search_toutiao(
                 and title
                 and normalized not in excluded
                 and normalized not in seen
+                and not is_video
+                and _is_toutiao_article_url(url)
                 and (
                     raw_host.endswith("toutiao.com")
                     or raw_host.endswith("zlink.toutiao.com")
@@ -2237,6 +2490,10 @@ async def _search_toutiao(
                         or value.get("datetime")
                     ),
                     "date_type": "发布日期",
+                    "word_count": clean_word_count(
+                        (value.get("data_ext") or {}).get("core_content_size")
+                        or value.get("content_size")
+                    ),
                     "image_url": _extract_mapping_image(value),
                 }
                 if _title_match_score(query, candidate) > 0:
@@ -2300,71 +2557,148 @@ async def _search_sogou(
         ),
         "Accept-Language": "zh-CN,zh;q=0.9",
     }
-    try:
-        async with httpx.AsyncClient(
-            timeout=20,
-            proxy=settings.glm_proxy_url or None,
-            follow_redirects=True,
-            headers=headers,
-        ) as client:
+    page = 1 + (len(excluded_urls) // 8)
+    excluded = {url.rstrip("/") for url in excluded_urls}
+    raw_results: list[dict[str, str]] = []
+
+    async with httpx.AsyncClient(
+        timeout=25,
+        proxy=settings.glm_proxy_url or None,
+        follow_redirects=True,
+        headers=headers,
+    ) as client:
+        try:
             response = await client.get(
                 "https://www.sogou.com/web",
-                params={
-                    "query": search_query,
-                    "page": 1 + (len(excluded_urls) // 8),
-                },
+                params={"query": search_query, "page": page},
             )
-        response.raise_for_status()
-    except httpx.HTTPError:
-        return []
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+            if "antispider" not in str(response.url):
+                for result in soup.select(".vrwrap"):
+                    heading = result.select_one("h3")
+                    anchor = heading.select_one("a") if heading else None
+                    if not heading or not anchor:
+                        continue
+                    title = heading.get_text(" ", strip=True)
+                    raw_url = str(anchor.get("href") or "").strip()
+                    if not title or not raw_url:
+                        continue
+                    snippet = result.select_one(".fz-mid") or result.select_one(
+                        ".str_info"
+                    )
+                    date_node = result.select_one(".cite-date")
+                    image_node = result.select_one("img")
+                    image_url = ""
+                    if image_node:
+                        image_url = (
+                            image_node.get("data-src")
+                            or image_node.get("src")
+                            or ""
+                        )
+                        image_url = (
+                            urljoin(str(response.url), image_url)
+                            if image_url
+                            else ""
+                        )
+                    raw_results.append(
+                        {
+                            "title": title,
+                            "raw_url": urljoin(str(response.url), raw_url),
+                            "summary": (
+                                snippet.get_text(" ", strip=True)
+                                if snippet
+                                else ""
+                            ),
+                            "publish_date": (
+                                date_node.get_text(" ", strip=True)
+                                if date_node
+                                else ""
+                            ),
+                            "image_url": image_url,
+                        }
+                    )
+        except httpx.HTTPError:
+            pass
 
-    soup = BeautifulSoup(response.text, "html.parser")
-    excluded = {url.rstrip("/") for url in excluded_urls}
+        if not raw_results:
+            reader_target = (
+                "http://www.sogou.com/web?"
+                + urlencode({"query": search_query, "page": page})
+            )
+            try:
+                reader_response = await client.get(
+                    f"https://r.jina.ai/{reader_target}",
+                    headers={"Accept": "text/plain"},
+                )
+                if reader_response.status_code < 400:
+                    for title, raw_url in re.findall(
+                        r"(?m)^###\s+\[([^\]\n]+)]"
+                        r"\((https?://www\.sogou\.com/link\?url=[^)]+)\)",
+                        reader_response.text,
+                    ):
+                        raw_results.append(
+                            {
+                                "title": _clean_research_text(title),
+                                "raw_url": html.unescape(raw_url),
+                                "summary": "",
+                                "publish_date": "",
+                                "image_url": "",
+                            }
+                        )
+            except httpx.HTTPError:
+                pass
+
+        async def resolve_result(raw_item: dict[str, str]) -> dict[str, str] | None:
+            raw_url = raw_item["raw_url"]
+            actual_url = raw_url
+            raw_host = urlparse(raw_url).netloc.lower().removeprefix("www.")
+            if raw_host.endswith("sogou.com"):
+                try:
+                    redirect_response = await client.get(raw_url)
+                except httpx.HTTPError:
+                    return None
+                actual_url = str(redirect_response.url)
+                if urlparse(actual_url).netloc.lower().endswith("sogou.com"):
+                    redirect_match = re.search(
+                        r"""(?:window\.location\.replace\(|URL=['"])["']?([^"'<>]+)""",
+                        redirect_response.text,
+                        re.I,
+                    )
+                    if redirect_match:
+                        actual_url = html.unescape(redirect_match.group(1))
+            host = urlparse(actual_url).netloc.lower().removeprefix("www.")
+            normalized = actual_url.rstrip("/")
+            if (
+                not actual_url.startswith(("http://", "https://"))
+                or normalized in excluded
+                or (source_domain and not host.endswith(source_domain))
+            ):
+                return None
+            return {
+                "title": raw_item["title"],
+                "url": actual_url,
+                "summary": raw_item["summary"],
+                "source": source_name.strip() or source_domain or host,
+                "publish_date": raw_item["publish_date"],
+                "date_type": "发布日期",
+                "image_url": raw_item["image_url"],
+            }
+
+        resolved = await asyncio.gather(
+            *(resolve_result(item) for item in raw_results[: max(count * 2, 20)])
+        )
+
     seen: set[str] = set()
     items: list[dict[str, str]] = []
-    for result in soup.select(".vrwrap"):
-        heading = result.select_one("h3")
-        if not heading:
+    for item in resolved:
+        if not item:
             continue
-        title = heading.get_text(" ", strip=True)
-        actual_url = ""
-        for data_node in result.select("[data-url]"):
-            candidate = (data_node.get("data-url") or "").strip()
-            host = urlparse(candidate).netloc.lower().removeprefix("www.")
-            if candidate.startswith(("http://", "https://")) and host.endswith(
-                source_domain
-            ):
-                actual_url = candidate
-                break
-        normalized = actual_url.rstrip("/")
-        if not title or not actual_url or normalized in excluded or normalized in seen:
+        normalized = item["url"].rstrip("/")
+        if normalized in seen:
             continue
-        snippet = result.select_one(".fz-mid") or result.select_one(".str_info")
-        summary = snippet.get_text(" ", strip=True) if snippet else ""
-        date_node = result.select_one(".cite-date")
-        image_node = result.select_one("img")
-        image_url = ""
-        if image_node:
-            image_url = (
-                image_node.get("data-src")
-                or image_node.get("src")
-                or ""
-            )
-            image_url = urljoin(str(response.url), image_url) if image_url else ""
         seen.add(normalized)
-        items.append(
-            {
-                "title": title,
-                "url": actual_url,
-                "summary": summary,
-                "source": source_name.strip() or source_domain,
-                "publish_date": (
-                    date_node.get_text(" ", strip=True) if date_node else ""
-                ),
-                "date_type": "发布日期",
-                "image_url": image_url,
-            }
-        )
+        items.append(item)
         if len(items) >= count:
             break
     return items

@@ -8,7 +8,10 @@ class ArticleBase(BaseModel):
     topic: str = Field(min_length=1, max_length=255)
     article_type: str = Field(default="技术", max_length=64)
     custom_type_description: str = Field(default="", max_length=1000)
-    writing_style: str = Field(default="温暖同行", max_length=64)
+    writing_style: str = Field(
+        default="保留原文主题和观点，用更自然、更有人情味的方式重新叙述",
+        max_length=1000,
+    )
     layout_style: str = Field(default="跟随原文", max_length=64)
     target_word_count: int = Field(default=1500, ge=200, le=5000)
     target_platform: str = Field(default="微信公众号", max_length=100)
@@ -37,7 +40,7 @@ class ArticleUpdate(BaseModel):
     topic: str | None = Field(default=None, min_length=1, max_length=255)
     article_type: str | None = Field(default=None, max_length=64)
     custom_type_description: str | None = Field(default=None, max_length=1000)
-    writing_style: str | None = Field(default=None, max_length=64)
+    writing_style: str | None = Field(default=None, max_length=1000)
     layout_style: str | None = Field(default=None, max_length=64)
     target_word_count: int | None = Field(default=None, ge=200, le=5000)
     target_platform: str | None = Field(default=None, max_length=100)

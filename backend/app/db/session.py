@@ -194,7 +194,17 @@ def create_tables() -> None:
         connection.execute(
             text(
                 "ALTER TABLE articles ADD COLUMN IF NOT EXISTS "
-                "writing_style VARCHAR(64) NOT NULL DEFAULT '温暖同行'"
+                "writing_style TEXT NOT NULL DEFAULT "
+                "'保留原文主题和观点，用更自然，更有人情味的方式重新叙述'"
+            )
+        )
+        connection.execute(
+            text("ALTER TABLE articles ALTER COLUMN writing_style TYPE TEXT")
+        )
+        connection.execute(
+            text(
+                "ALTER TABLE articles ALTER COLUMN writing_style SET DEFAULT "
+                "'保留原文主题和观点，用更自然，更有人情味的方式重新叙述'"
             )
         )
         connection.execute(

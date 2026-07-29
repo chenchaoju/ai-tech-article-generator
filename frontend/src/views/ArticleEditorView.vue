@@ -61,6 +61,7 @@ const DEFAULT_SOURCE_SITES = [
   { id: 'zhihu', name: '知乎', domain: 'zhihu.com', url: 'https://www.zhihu.com/' },
   { id: 'cnblogs', name: '博客园', domain: 'cnblogs.com', url: 'https://www.cnblogs.com/' },
 ]
+const DEFAULT_WRITING_INSTRUCTION = '保留原文主题和观点，用更自然、更有人情味的方式重新叙述'
 const savedWritingPreferences = loadWritingPreferences()
 
 function loadCustomSites() {
@@ -127,7 +128,7 @@ const form = reactive({
   topic: '',
   article_type: savedWritingPreferences.article_type,
   custom_type_description: '',
-  writing_style: savedWritingPreferences.writing_style,
+  writing_style: savedWritingPreferences.writing_style || DEFAULT_WRITING_INSTRUCTION,
   layout_style: '跟随原文',
   target_word_count: 1500,
   target_platform: '微信公众号',
@@ -357,6 +358,16 @@ function workspaceKey(id = articleId.value) {
   return `article-studio-workspace-${id || 'new'}`
 }
 
+function normalizeWritingInstruction() {
+  const style = String(form.writing_style || '').trim()
+  const prompt = String(form.project_background || '').trim()
+  const parts = [style, prompt].filter(Boolean)
+  form.writing_style = (
+    parts.length ? [...new Set(parts)].join('；') : DEFAULT_WRITING_INSTRUCTION
+  ).slice(0, 1000)
+  form.project_background = ''
+}
+
 function saveWorkspaceSnapshot() {
   if (!workspaceReady.value) return
   clearTimeout(workspaceSaveTimer)
@@ -399,6 +410,7 @@ function restoreWorkspaceSnapshot() {
     const snapshot = JSON.parse(localStorage.getItem(workspaceKey()) || 'null')
     if (!snapshot?.form) return false
     Object.assign(form, snapshot.form)
+    normalizeWritingInstruction()
     normalizeTargetWordCount()
     if (form.selected_sources.length > 1) {
       form.selected_sources.splice(0, form.selected_sources.length - 1)
@@ -423,11 +435,13 @@ function restoreWorkspaceSnapshot() {
 }
 
 function payload(statusOverride) {
+  normalizeWritingInstruction()
   return {
     ...form,
     title: form.title.trim() || '未命名文章',
     topic: form.topic.trim(),
     layout_style: '跟随原文',
+    project_background: '',
     status: statusOverride || form.status || 'draft',
   }
 }
@@ -442,6 +456,7 @@ async function loadArticle() {
   try {
     const data = await articleApi.get(articleId.value)
     Object.assign(form, data)
+    normalizeWritingInstruction()
     normalizeTargetWordCount()
     form.layout_style = '跟随原文'
     searchQuery.value = data.topic
@@ -527,7 +542,9 @@ async function persistArticleImages() {
 
 async function resetWorkspaceForNewArticle(preserveWritingPreferences = false) {
   const rememberedArticleType = preserveWritingPreferences ? form.article_type : ''
-  const rememberedWritingStyle = preserveWritingPreferences ? form.writing_style : ''
+  const rememberedWritingStyle = preserveWritingPreferences
+    ? form.writing_style
+    : DEFAULT_WRITING_INSTRUCTION
   workspaceReady.value = false
   clearTimeout(workspaceSaveTimer)
   localStorage.removeItem(workspaceKey())
@@ -598,6 +615,35 @@ function usesMobileResearch() {
   return typeof window !== 'undefined' && window.matchMedia('(max-width: 780px)').matches
 }
 
+let researchRequestVersion = 0
+
+function clearResearchQuery() {
+  researchRequestVersion += 1
+  titleRequestVersion += 1
+  clearTimeout(selectedTitleRefreshTimer)
+  searchQuery.value = ''
+  searchResults.value = []
+  titleSuggestions.value = []
+  titleHistory.value = []
+  customTitle.value = ''
+  loadingSourceUrl.value = ''
+  form.topic = ''
+  form.title = ''
+  form.selected_sources = []
+  sourceSort.value = 'newest'
+  sourceDateFilter.value = 'all'
+  targetWordCountCustomized.value = false
+  form.target_word_count = 1500
+  discovering.value = false
+  loadingTitles.value = false
+  localStorage.removeItem(workspaceKey())
+  autosaveState.value = '本次查询已清空'
+}
+
+function handleSearchQueryInput() {
+  if (!searchQuery.value.trim()) clearResearchQuery()
+}
+
 async function discover(requestCount = 10, broadSearch = false) {
   requestCount = Number.isInteger(requestCount) ? requestCount : 10
   broadSearch = broadSearch === true
@@ -606,6 +652,7 @@ async function discover(requestCount = 10, broadSearch = false) {
     showNotice('先输入想查找的主题或关键词', 'error')
     return
   }
+  const requestVersion = ++researchRequestVersion
   form.topic = query
   sourceSort.value = 'newest'
   searchResults.value = []
@@ -629,6 +676,7 @@ async function discover(requestCount = 10, broadSearch = false) {
         date_range: sourceDateFilter.value,
         sort_order: sourceSort.value,
       })
+      if (requestVersion !== researchRequestVersion) return
       searchResults.value = sources.items
       if (sources.items.length < 5) {
         showNotice(
@@ -650,6 +698,7 @@ async function discover(requestCount = 10, broadSearch = false) {
         excluded_titles: [],
         source_titles: searchResults.value.slice(0, 8).map((item) => item.title),
       })
+      if (requestVersion !== researchRequestVersion) return
       titleSuggestions.value = titles.titles
       titleHistory.value = [...titles.titles]
       if (titles.titles.length && !form.title.trim()) form.title = titles.titles[0]
@@ -663,8 +712,10 @@ async function discover(requestCount = 10, broadSearch = false) {
       showNotice(getApiError(titleError, '标题准备失败，但来源已经显示'), 'error')
     }
   } finally {
-    discovering.value = false
-    loadingTitles.value = false
+    if (requestVersion === researchRequestVersion) {
+      discovering.value = false
+      loadingTitles.value = false
+    }
   }
 }
 
@@ -1121,7 +1172,15 @@ onBeforeUnmount(() => {
           </div>
           <div class="research-input">
             <Search :size="17" />
-            <input v-model="searchQuery" placeholder="输入文章标题或关键词" @keyup.enter="discoverMobile" />
+            <input v-model="searchQuery" placeholder="输入文章标题或关键词" @input="handleSearchQueryInput" @keyup.enter="discoverMobile" />
+            <button
+              v-if="searchQuery"
+              class="research-clear-button"
+              type="button"
+              aria-label="清空本次查询"
+              title="清空本次查询"
+              @click="clearResearchQuery"
+            ><X :size="14" /></button>
             <button type="button" :disabled="discovering" @click="discoverMobile">
               <LoaderCircle v-if="discovering" class="spin" :size="15" />{{ discovering ? '查找中' : '查找' }}
             </button>
@@ -1217,7 +1276,15 @@ onBeforeUnmount(() => {
               </div>
               <div class="research-input">
                 <Search :size="17" />
-                <input v-model="searchQuery" placeholder="例如：AI 应用、Codex、牛油果营养" @keyup.enter="discover" />
+                <input v-model="searchQuery" placeholder="例如：AI 应用、Codex、牛油果营养" @input="handleSearchQueryInput" @keyup.enter="discover" />
+                <button
+                  v-if="searchQuery"
+                  class="research-clear-button"
+                  type="button"
+                  aria-label="清空本次查询"
+                  title="清空本次查询"
+                  @click="clearResearchQuery"
+                ><X :size="14" /></button>
                 <button type="button" :disabled="discovering" @click="discover">
                   <LoaderCircle v-if="discovering" class="spin" :size="15" />{{ discovering ? '准备中' : '开始' }}
                 </button>
@@ -1235,27 +1302,18 @@ onBeforeUnmount(() => {
             </section>
 
             <section class="choice-section">
-              <div class="choice-heading"><span>03</span><div><strong>表达风格</strong></div></div>
-              <input
+              <div class="choice-heading"><span>03</span><div><strong>表达风格与提示词</strong></div></div>
+              <textarea
                 v-model="form.writing_style"
-                class="custom-preference-input"
-                maxlength="64"
-                placeholder="例如：冷静专业、富有人情、生动有趣、简洁直给"
-              />
+                class="custom-preference-input writing-instruction-input"
+                maxlength="1000"
+                rows="3"
+                :placeholder="DEFAULT_WRITING_INSTRUCTION"
+              ></textarea>
             </section>
 
             <section class="choice-section">
-              <div class="choice-heading"><span>04</span><div><strong>提示词</strong></div></div>
-              <input
-                v-model="form.project_background"
-                class="custom-preference-input"
-                maxlength="500"
-                placeholder="例如：保留原文事实，用更自然、更有人情味的方式重新叙述"
-              />
-            </section>
-
-            <section class="choice-section">
-              <div class="choice-heading"><span>05</span><div><strong>字数与发布平台</strong></div></div>
+              <div class="choice-heading"><span>04</span><div><strong>字数与发布平台</strong></div></div>
               <div class="custom-word-count-picker">
                 <div>
                   <strong>生成字数</strong>

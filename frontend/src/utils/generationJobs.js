@@ -1,5 +1,6 @@
 const JOBS_KEY = 'article-background-generation-jobs'
 const PREFERENCES_KEY = 'article-studio-writing-preferences'
+const DEFAULT_WRITING_INSTRUCTION = '保留原文主题和观点，用更自然、更有人情味的方式重新叙述'
 
 export function loadGenerationJobs() {
   try {
@@ -50,10 +51,10 @@ export function loadWritingPreferences() {
     const value = JSON.parse(localStorage.getItem(PREFERENCES_KEY) || '{}')
     return {
       article_type: String(value?.article_type || ''),
-      writing_style: String(value?.writing_style || ''),
+      writing_style: String(value?.writing_style || DEFAULT_WRITING_INSTRUCTION),
     }
   } catch {
-    return { article_type: '', writing_style: '' }
+    return { article_type: '', writing_style: DEFAULT_WRITING_INSTRUCTION }
   }
 }
 

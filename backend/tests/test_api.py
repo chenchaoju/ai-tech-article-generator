@@ -17,12 +17,17 @@ from app.api.routes.settings import _normalize_base_url
 from app.services.glm import (
     ARTICLE_DISCLAIMER,
     _build_text_change_records,
+    _cache_source_content,
     _clean_research_text,
     _enrich_search_metadata,
     _extract_json_ld_article,
     _extract_page_publish_date,
+    _filter_extractable_metadata,
     _finalize_search_metadata,
     _finalize_search_results,
+    _get_cached_source_content,
+    _is_toutiao_detail_url,
+    _is_usable_selected_body,
     _parse_csdn_results,
     _parse_juejin_results,
     _search_query_variants,
@@ -456,6 +461,74 @@ def test_search_metadata_keeps_candidates_without_body_text() -> None:
     assert results[0]["word_count"] == 0
 
 
+def test_search_metadata_rejects_homepages_and_caches_preloaded_body() -> None:
+    cache_url = f"https://example.com/article/{uuid4().hex}"
+    body = "可验证的完整正文。" * 80
+    results = _finalize_search_metadata(
+        [
+            {
+                "title": "站点首页",
+                "url": "https://example.com/",
+                "summary": "首页导航",
+                "source": "测试站点",
+            },
+            {
+                "title": "## _AI应用_落地实践",
+                "url": cache_url,
+                "summary": "文章摘要",
+                "source_content": body,
+                "source": "测试站点",
+            },
+        ],
+        "AI应用",
+        10,
+    )
+    assert [item["title"] for item in results] == ["AI应用落地实践"]
+    assert results[0]["source_content"] == ""
+    cached = _get_cached_source_content(cache_url)
+    assert cached is not None
+    assert cached["source_content"] == body
+    assert cached["word_count"] >= 200
+
+
+def test_extractable_metadata_only_returns_hydrated_articles(monkeypatch) -> None:
+    good_url = f"https://example.com/good/{uuid4().hex}"
+    bad_url = f"https://example.com/bad/{uuid4().hex}"
+
+    async def fake_fetch(item):
+        if item["url"] == bad_url:
+            raise RuntimeError("正文无法提取")
+        return {
+            **item,
+            "source_content": "正文内容。" * 100,
+            "word_count": 500,
+            "publish_date": "2026-07-29",
+            "date_type": "发布日期",
+        }
+
+    monkeypatch.setattr("app.services.glm.fetch_source_content", fake_fetch)
+    results = asyncio.run(
+        _filter_extractable_metadata(
+            [
+                {
+                    "title": "可以提取的文章",
+                    "url": good_url,
+                    "source": "测试站点",
+                },
+                {
+                    "title": "无法提取的文章",
+                    "url": bad_url,
+                    "source": "测试站点",
+                },
+            ],
+            10,
+        )
+    )
+    assert [item["url"] for item in results] == [good_url]
+    assert results[0]["source_content"] == ""
+    assert results[0]["word_count"] == 500
+
+
 def test_search_material_filters_short_pages_and_removes_heading_markers() -> None:
     cleaned = _clean_research_text("# 抓取标题\n\n## 正文\n" + "内容" * 100)
     assert "# 抓取标题" not in cleaned
@@ -537,6 +610,14 @@ def test_fuzzy_query_expansion_and_newest_real_date_priority() -> None:
         "AI应用",
         {"title": "DevSecOps 智能化：Gitee 分层 AI 落地实践"},
     ) > 0
+    assert _search_query_variants("香蕉") == [
+        "香蕉",
+        "香蕉 科普",
+        "香蕉 经验",
+        "香蕉 方法",
+        "香蕉 知识",
+        "香蕉 技巧",
+    ]
 
     sorted_items = _sort_search_results(
         [
@@ -566,6 +647,35 @@ def test_fuzzy_query_expansion_and_newest_real_date_priority() -> None:
         "AI 应用的较早文章",
         "检索当天才发现的旧文章",
     ]
+
+
+def test_toutiao_detail_and_video_shell_detection() -> None:
+    assert _is_toutiao_detail_url(
+        "https://www.toutiao.com/article/7485036402925781554/"
+    )
+    assert _is_toutiao_detail_url(
+        "https://toutiao.com/group/7628976582358532644/?upstream_biz=search"
+    )
+    assert not _is_toutiao_detail_url(
+        "https://www.toutiao.com/topic/7489636802068990003/"
+    )
+    assert not _is_toutiao_detail_url(
+        "https://www.toutiao.com/zixun/7500390903841081380/"
+    )
+    assert _is_usable_selected_body(
+        "这是一段完整正文。" * 80,
+        "香蕉文章",
+        "https://www.toutiao.com/article/7485036402925781554/",
+    )
+    assert not _is_usable_selected_body(
+        (
+            "关注 推荐 北京 视频 财经 科技 热点 国际 "
+            "视频加载失败 自动连播 点击切换下一个视频 下载今日头条APP "
+        )
+        * 30,
+        "视频页面",
+        "https://www.toutiao.com/group/7170911937969160736/",
+    )
 
 
 def test_csdn_native_results_keep_full_body_and_clean_url() -> None:
@@ -1015,7 +1125,8 @@ def test_four_role_generation_pipeline_records_each_role(monkeypatch) -> None:
     assert "【用户填写的表达风格】" not in api_prompts[0]
     assert "【用户填写的表达风格】" not in api_prompts[2]
     assert all(
-        "【用户提示词】\n请按照已选文章主题进行修改" in prompt
+        "【用户提示词】\n保留原文主题和观点，用更自然、更有人情味的方式重新叙述"
+        in prompt
         for prompt in api_prompts
     )
     assert all("只能依据原始材料解释主题" in prompt for prompt in api_prompts[1:])
